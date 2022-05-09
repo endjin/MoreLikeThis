@@ -1,0 +1,93 @@
+#!markdown
+
+In this example, we are going to use the [Argotic Syndication Framework](https://github.com/argotic-syndication-framework/Argotic) to download all the blog posts from an RSS feed, and use [Lucene.NET's](https://github.com/apache/lucenenet) [MoreLikeThis](https://lucenenet.apache.org/docs/4.8.0-beta00016/api/queries/Lucene.Net.Queries.Mlt.MoreLikeThis.html) to generate 3 similar blog posts from the feed, for each item in the feed.
+
+#!csharp
+
+#r "nuget:Argotic.Core,*-*"
+
+#!csharp
+
+#r "nuget:Lucene.Net.Analysis.Common,4.8.0-beta00016"
+// MoreLikeThis exists in the following NuGet Package
+#r "nuget:Lucene.Net.Queries,4.8.0-beta00016"
+
+#!csharp
+
+// Needed to use Argotic's RssFeed
+using Argotic.Syndication;
+
+#!csharp
+
+// These are the Lucene namespaces you need in order to use MoreLikeThis
+using Lucene.Net.Analysis.Standard;
+using Lucene.Net.Documents;
+using Lucene.Net.Index;
+using Lucene.Net.Search;
+using Lucene.Net.Util;
+
+#!csharp
+
+// Wrap MoreLikeThis functionality in a method, as we'll want to call this once per item in the RSS feed.
+public IEnumerable<(string Title, string Id)> GetMoreLike(Lucene.Net.Store.Directory directory, string content, string id, int numberOfSuggestions)
+{
+    using (var indexReader = DirectoryReader.Open(directory))
+    {
+        var moreLikeThis = new Lucene.Net.Queries.Mlt.MoreLikeThis(indexReader)
+        {
+            Analyzer = new StandardAnalyzer(LuceneVersion.LUCENE_48),
+            FieldNames = new string[] { "contents", "title" },
+            MinWordLen = 2,
+            MinTermFreq = 1
+        };
+
+        BooleanQuery query = (BooleanQuery)moreLikeThis.Like(new System.IO.StringReader(content), "contents");
+
+        // We must exclude the original document, otherwise it will be returned at the top "MoreLike" result.
+        query.Add(new BooleanClause(new TermQuery(new Term("id", id)), Occur.MUST_NOT));
+        
+        var indexSearcher = new IndexSearcher(indexReader);
+        TopDocs results = indexSearcher.Search(query, numberOfSuggestions);
+
+        // The results only contain id's of matching documents, so we need to retrieve the entire doc to get the content.
+        foreach(var result in results.ScoreDocs.Select(scoreDoc => indexSearcher.Doc(scoreDoc.Doc)))
+        {
+            yield return new (result.Get("title"), result.Get("id"));
+        }
+    }
+}
+
+#!csharp
+
+RssFeed feed = RssFeed.Create(new Uri("https://endjin.com/rss.xml"));
+
+using (Lucene.Net.Store.RAMDirectory directory = new Lucene.Net.Store.RAMDirectory())
+{
+    var indexWriter = new IndexWriter(directory, new IndexWriterConfig(LuceneVersion.LUCENE_48, 
+                                                            new StandardAnalyzer(LuceneVersion.LUCENE_48)));
+
+    foreach (var item in feed.Channel.Items)
+    {
+        var document = new Document
+        {
+            new TextField("title", item.Title, Field.Store.YES),                                
+            new TextField("contents", item.Description, Field.Store.YES),
+            // Id's must be a StringField so that they are not tokenised. This is required so we can exclude the original document from the suggestions.
+            new StringField("id", item.Link.ToString(), Field.Store.YES)
+        };
+
+        indexWriter.AddDocument(document);
+    }
+
+    indexWriter.Commit();
+
+    foreach (var item in feed.Channel.Items)
+    {
+        Console.WriteLine($"{item.Title}:");
+
+        foreach(var result in GetMoreLike(directory, item.Description, item.Link.ToString(), numberOfSuggestions: 3))
+        {
+            Console.WriteLine($"\t- {result.Title}");
+        }
+    }
+}
