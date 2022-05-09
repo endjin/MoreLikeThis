@@ -20,6 +20,9 @@ using Argotic.Syndication;
 #!csharp
 
 // These are the Lucene namespaces you need in order to use MoreLikeThis
+using Lucene.Net.Analysis;
+using Lucene.Net.Analysis.Core;
+using Lucene.Net.Analysis.En;
 using Lucene.Net.Analysis.Standard;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
@@ -29,13 +32,13 @@ using Lucene.Net.Util;
 #!csharp
 
 // Wrap MoreLikeThis functionality in a method, as we'll want to call this once per item in the RSS feed.
-public IEnumerable<(string Title, string Id)> GetMoreLike(Lucene.Net.Store.Directory directory, string content, string id, int numberOfSuggestions)
+public IEnumerable<(string Title, string Id)> GetMoreLike(Lucene.Net.Store.Directory directory, Analyzer analyzer, string content, string id, int numberOfSuggestions)
 {
     using (var indexReader = DirectoryReader.Open(directory))
     {
         var moreLikeThis = new Lucene.Net.Queries.Mlt.MoreLikeThis(indexReader)
         {
-            Analyzer = new StandardAnalyzer(LuceneVersion.LUCENE_48),
+            Analyzer = analyzer,
             FieldNames = new string[] { "contents", "title" },
             MinWordLen = 2,
             MinTermFreq = 1
@@ -63,8 +66,22 @@ RssFeed feed = RssFeed.Create(new Uri("https://endjin.com/rss.xml"));
 
 using (Lucene.Net.Store.RAMDirectory directory = new Lucene.Net.Store.RAMDirectory())
 {
-    var indexWriter = new IndexWriter(directory, new IndexWriterConfig(LuceneVersion.LUCENE_48, 
-                                                            new StandardAnalyzer(LuceneVersion.LUCENE_48)));
+    Analyzer analyzer = Analyzer.NewAnonymous(createComponents: (fieldName, reader) =>
+    {
+        LuceneVersion version = LuceneVersion.LUCENE_48;
+        
+        Tokenizer tokenizer = new StandardTokenizer(version, reader)
+        {
+            MaxTokenLength = 255,
+        };
+        TokenStream filter = new StandardFilter(version, tokenizer);
+        filter = new LowerCaseFilter(version, filter);
+        filter = new PorterStemFilter(filter);
+        
+        return new TokenStreamComponents(tokenizer, filter);
+    });
+
+    var indexWriter = new IndexWriter(directory, new IndexWriterConfig(LuceneVersion.LUCENE_48, analyzer));
 
     foreach (var item in feed.Channel.Items)
     {
@@ -85,7 +102,7 @@ using (Lucene.Net.Store.RAMDirectory directory = new Lucene.Net.Store.RAMDirecto
     {
         Console.WriteLine($"{item.Title}:");
 
-        foreach(var result in GetMoreLike(directory, item.Description, item.Link.ToString(), numberOfSuggestions: 3))
+        foreach(var result in GetMoreLike(directory, analyzer, item.Description, item.Link.ToString(), numberOfSuggestions: 3))
         {
             Console.WriteLine($"\t- {result.Title}");
         }
